@@ -730,7 +730,6 @@ async def list_tasks(
             params_list.append(f"status={status}")
         # Join with & and return
         return f"/api/v1/tasks?{'&'.join(params_list)}"
-
     return {
         "tasks": tasks_list,
         "pagination": {
