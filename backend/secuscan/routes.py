@@ -76,7 +76,7 @@ from .ratelimit import (
     task_start_limiter, vault_limiter,
     report_download_limiter, read_heavy_limiter
 )
-from .validation import validate_target, validate_task_start_payload
+from .validation import validate_target_async, validate_task_start_payload
 from .reporting import reporting
 from .vault import VaultCrypto
 from .workflows import scheduler
@@ -231,7 +231,7 @@ async def start_task(
         should_validate_target = plugin.category != "code" and not is_filesystem_target(target_str)
 
         if should_validate_target:
-            is_valid, error_msg = validate_target(target_str, safe_mode)
+            is_valid, error_msg = await validate_target_async(target_str, safe_mode)
 
             if not is_valid:
                 logger.warning(f"Task start failed: Target validation failed for '{target}': {error_msg}")

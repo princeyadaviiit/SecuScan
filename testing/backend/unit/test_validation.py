@@ -1,24 +1,32 @@
 import pytest
+from unittest.mock import patch
 from backend.secuscan.validation import (
-    validate_target, validate_port, validate_port_range, validate_url,
+    validate_target_async, validate_port, validate_port_range, validate_url,
     sanitize_input, is_safe_path, match_pattern
 )
 
 
-def test_validate_target():
-    # Valid IP target
-    assert validate_target("192.168.1.1", safe_mode=True) == (True, "")
+@pytest.mark.asyncio
+async def test_validate_target():
+    # Valid IP target (no DNS lookup needed)
+    assert await validate_target_async("192.168.1.1", safe_mode=True) == (True, "")
 
-    # Valid hostname target
-    assert validate_target("example.com", safe_mode=False) == (True, "")
+    # Valid hostname target - mock DNS to return valid private IP
+    with patch('backend.secuscan.validation.resolve_hostname_to_ips') as mock_resolve:
+        mock_resolve.return_value = ["93.184.216.34"]  # example.com IP
+        assert (await validate_target_async("example.com", safe_mode=False))[0] is True
 
     # Safe mode restrictions
-    assert validate_target("8.8.8.8", safe_mode=True)[0] is False  # Public IP blocked in safe mode
-    assert validate_target("military.mil", safe_mode=True)[0] is False  # Blocked TLD
+    assert (await validate_target_async("8.8.8.8", safe_mode=True))[0] is False  # Public IP blocked in safe mode
+
+    # Blocked TLD - mock DNS to return valid IP but TLD should be blocked first
+    with patch('backend.secuscan.validation.resolve_hostname_to_ips') as mock_resolve:
+        mock_resolve.return_value = ["192.168.1.1"]
+        assert (await validate_target_async("military.mil", safe_mode=True))[0] is False  # Blocked TLD
 
     # Invalid targets
-    assert validate_target("10.0.0.0/24")[0] is True  # Private CIDR ranges are allowed in safe mode
-    assert validate_target("not!a!valid!hostname")[0] is False
+    assert (await validate_target_async("10.0.0.0/24", safe_mode=True))[0] is True  # Private CIDR ranges are allowed in safe mode
+    assert (await validate_target_async("not!a!valid!hostname", safe_mode=False))[0] is False
 
 
 def test_validate_port():
