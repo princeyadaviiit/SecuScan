@@ -4,7 +4,9 @@ Input validation and security checks
 
 import re
 import ipaddress
-from typing import Any, Dict, Tuple
+import socket
+import asyncio
+from typing import Any, Dict, Tuple, List
 from fnmatch import fnmatch
 
 from .config import settings
@@ -29,14 +31,81 @@ ALLOWED_PRIVATE = [
 BLOCKED_TLDS = [".mil", ".gov"]
 
 
-def validate_target(target: str, safe_mode: bool = True) -> Tuple[bool, str]:
+async def resolve_hostname_to_ips(hostname: str) -> List[str]:
     """
-    Validate scan target address (IP, Hostname, URL, or CIDR).
-    
+    Resolve a hostname to its IP address(es) using DNS.
+
+    Args:
+        hostname: Hostname to resolve
+
+    Returns:
+        List of IP addresses (as strings)
+
+    Raises:
+        socket.gaierror: If hostname cannot be resolved
+    """
+    loop = asyncio.get_event_loop()
+    # getaddrinfo returns [(family, type, proto, canonname, sockaddr), ...]
+    # sockaddr is (ip, port) for IPv4 or (ip, port, flow, scope) for IPv6
+    infos = await loop.run_in_executor(
+        None, socket.getaddrinfo, hostname, None, 0, 0, socket.IPPROTO_TCP
+    )
+
+    # Extract unique IP addresses
+    ips = []
+    seen = set()
+    for info in infos:
+        ip_str = info[4][0]
+        if ip_str not in seen:
+            ips.append(ip_str)
+            seen.add(ip_str)
+
+    return ips
+
+
+def _validate_ip_address(ip_str: str, safe_mode: bool) -> Tuple[bool, str]:
+    """
+    Validate a single IP address against security policies.
+
+    Args:
+        ip_str: IP address string to validate
+        safe_mode: Whether to enforce safe mode restrictions
+
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    try:
+        addr = ipaddress.ip_address(ip_str)
+
+        # Check blocked networks (Broadcast, Link-local, Multicast)
+        for blocked in BLOCKED_NETWORKS:
+            if addr in blocked:
+                return False, f"IP address {ip_str} is in blocked network range {blocked}"
+
+        # Check for loopback
+        if addr.is_loopback and not settings.allow_loopback_scans:
+            return False, f"Loopback address {ip_str} is disabled in global settings"
+
+        # Safe mode: only allow private IPs
+        if safe_mode:
+            is_private = any(addr in allowed for allowed in ALLOWED_PRIVATE)
+            if not is_private:
+                return False, f"Public IP {ip_str} not allowed in safe mode (SecuScan Guardrail)"
+
+        return True, ""
+
+    except ValueError as e:
+        return False, f"Invalid IP address: {e}"
+
+
+async def validate_target_async(target: str, safe_mode: bool = True) -> Tuple[bool, str]:
+    """
+    Async version of validate_target that resolves hostnames to IPs.
+
     Args:
         target: IP address, hostname, or network range to validate
         safe_mode: Whether to enforce safe mode restrictions
-    
+
     Returns:
         Tuple of (is_valid, error_message)
     """
@@ -47,7 +116,7 @@ def validate_target(target: str, safe_mode: bool = True) -> Tuple[bool, str]:
     # Try parsing as IP network (handles single IP and CIDR)
     try:
         net = ipaddress.ip_network(target, strict=False)
-        
+
         # Check blocked networks (Broadcast, Link-local, Multicast)
         if any(net.overlaps(blocked) for blocked in BLOCKED_NETWORKS):
             return False, "Target overlaps with blocked network range"
@@ -92,7 +161,52 @@ def validate_target(target: str, safe_mode: bool = True) -> Tuple[bool, str]:
             if hostname_to_validate.lower().endswith(tld):
                 return False, f"Domains ending in {tld} are blocked in safe mode"
 
-    return True, ""
+    # SECURITY FIX: Resolve hostname to IP addresses and validate each one
+    try:
+        resolved_ips = await resolve_hostname_to_ips(hostname_to_validate)
+
+        if not resolved_ips:
+            return False, "Hostname could not be resolved to any IP addresses"
+
+        # Validate each resolved IP address
+        for ip_str in resolved_ips:
+            is_valid, error_msg = _validate_ip_address(ip_str, safe_mode)
+            if not is_valid:
+                # Don't leak the hostname in the error message for security
+                return False, f"Target resolves to blocked address: {error_msg}"
+
+        return True, ""
+
+    except socket.gaierror:
+        return False, "Hostname could not be resolved"
+    except Exception:
+        return False, "Error validating hostname"
+
+
+def validate_target(target: str, safe_mode: bool = True) -> Tuple[bool, str]:
+    """
+    Synchronous wrapper for validate_target_async.
+
+    DEPRECATED: Use validate_target_async() in async contexts for proper DNS resolution.
+    This wrapper is provided for backward compatibility only.
+
+    Args:
+        target: IP address, hostname, or network range to validate
+        safe_mode: Whether to enforce safe mode restrictions
+
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If we're already in an async context, we can't use run_until_complete
+            # This should not happen in practice since callers should use the async version
+            raise RuntimeError("validate_target() called from async context. Use validate_target_async() instead.")
+        return loop.run_until_complete(validate_target_async(target, safe_mode))
+    except RuntimeError:
+        # No event loop, create a new one
+        return asyncio.run(validate_target_async(target, safe_mode))
 
 
 def validate_port(port: int) -> Tuple[bool, str]:
