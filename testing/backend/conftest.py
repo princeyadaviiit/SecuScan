@@ -41,6 +41,7 @@ def setup_test_environment(monkeypatch):
 def test_client(setup_test_environment):
     """Provides a synchronous test client backed by initialized async services."""
     import asyncio
+    from unittest.mock import patch, AsyncMock
 
     async def setup():
         await rate_limiter.reset()
@@ -56,8 +57,15 @@ def test_client(setup_test_environment):
 
     asyncio.run(setup())
 
-    with TestClient(app) as client:
-        yield client
+    # Mock DNS resolution to return safe private IPs for integration tests
+    # This prevents real DNS lookups that would resolve to public IPs blocked in safe mode
+    async def mock_resolve_hostname(hostname: str):
+        """Return a safe private IP for any hostname in tests."""
+        return ["192.168.1.100"]
+
+    with patch('backend.secuscan.validation.resolve_hostname_to_ips', side_effect=mock_resolve_hostname):
+        with TestClient(app) as client:
+            yield client
 
     async def teardown():
         await rate_limiter.reset()
